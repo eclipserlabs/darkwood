@@ -120,18 +120,36 @@ Prerequisites:
 - PostgreSQL 15+
 - Hex + Rebar (`mix local.hex`, `mix local.rebar`)
 
-Once the Phoenix app is generated in this repo, the standard flow applies:
+Create a local Postgres role/database using the generated defaults (`postgres` / `postgres` on `localhost:5432`), or override the host with `DATABASE_HOST`. Then run:
 
 ```bash
+mix deps.get
 mix setup
-mix ecto.setup
 mix test
 mix phx.server
 ```
 
 Then visit [`localhost:4000`](http://localhost:4000).
 
-Seed data will include one realistic incident with events and annotations (no secrets).
+`mix setup` creates and migrates the database, installs/builds assets, and runs `priv/repo/seeds.exs`. The seed is idempotent and creates `Checkout API 500 spike` with five ordered events and secret-free metadata.
+
+To set up the database and seed separately:
+
+```bash
+mix ecto.create
+mix ecto.migrate
+mix run priv/repo/seeds.exs
+```
+
+## Manual realtime verification
+
+Use two independent browser cookie sessions (for example, a normal profile and an incognito profile), not two ordinary tabs:
+
+1. Open `http://localhost:4000` in both sessions and join as Alice and Bob.
+2. Open the same incident in both sessions and confirm both names appear under connected responders.
+3. Add an annotation as Alice and confirm Bob sees it without refreshing.
+4. Change the status as Bob and confirm Alice sees it without refreshing.
+5. Close Bob's session and confirm Bob disappears from Alice's responder list after the disconnect is observed.
 
 ## Verification
 
@@ -147,33 +165,19 @@ Also run database setup/migrations from a clean database and verify the server b
 
 Do not fix failing tests by weakening assertions unless the requirement itself has changed.
 
-Commands executed for this README change:
-
-- `git status`
-- `git branch --show-current`
-- `ls -la` / directory read
-- `git checkout -b feat/darkwood-mvp`
-
-No `mix` verification applies yet — there is no Elixir code to format, compile, or test.
+The application includes focused context, controller, LiveView, PubSub, and Presence tests. Run the complete local gate with `mix precommit`.
 
 ## Project Structure
-
-Current:
-
-```text
-.
-├── LICENSE
-└── README.md
-```
-
-Intended (after `mix phx.new`):
 
 ```text
 lib/
 ├── darkwood/
-│   └── incidents.ex        # context: incidents, events, annotations
+│   ├── incidents.ex        # context: incidents, events, annotations
+│   └── incidents/          # Ecto schemas
 └── darkwood_web/
-    └── live/               # incident list / detail LiveViews
+    ├── controllers/        # display-name join flow
+    ├── live/               # incident list / detail LiveViews
+    └── presence.ex         # Phoenix Presence
 priv/
 ├── repo/migrations/       # incidents, events, annotations + FKs/indexes
 └── repo/seeds.exs          # one realistic seed incident
