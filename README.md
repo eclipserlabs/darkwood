@@ -11,8 +11,6 @@ Darkwood is a small real-time collaborative incident workspace built with Elixir
 
 The MVP is deliberately small: a display-name session, incident list/create, incident detail with a read-only event timeline, general and event-specific annotations, status changes, real-time annotation/status updates, and real-time connected-user presence.
 
-The MVP is implemented as a conventional Phoenix application. It requires no external SaaS service.
-
 ## Stack
 
 - Elixir 1.17+
