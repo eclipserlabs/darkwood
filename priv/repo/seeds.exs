@@ -1,11 +1,4 @@
-# Script for populating the database. You can run it as:
-#
-#     mix run priv/repo/seeds.exs
-#
-# Inside the script, you can read and write to any of your
-# repositories directly:
-#
-#     Darkwood.Repo.insert!(%Darkwood.SomeSchema{})
-#
-# We recommend using the bang functions (`insert!`, `update!`
-# and so on) as they will fail if something goes wrong.
+case Darkwood.Incidents.create_sample_incident() do
+  {:ok, incident} -> IO.puts("Sample incident ready: #{incident.title} (id=#{incident.id})")
+  {:error, reason} -> raise "sample incident failed: #{inspect(reason)}"
+end

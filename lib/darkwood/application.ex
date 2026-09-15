@@ -12,6 +12,7 @@ defmodule Darkwood.Application do
       Darkwood.Repo,
       {DNSCluster, query: Application.get_env(:darkwood, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Darkwood.PubSub},
+      DarkwoodWeb.Presence,
       # Start a worker by calling: Darkwood.Worker.start_link(arg)
       # {Darkwood.Worker, arg},
       # Start to serve requests, typically the last entry

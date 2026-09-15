@@ -17,7 +17,13 @@ defmodule DarkwoodWeb.Router do
   scope "/", DarkwoodWeb do
     pipe_through :browser
 
-    get "/", PageController, :home
+    get "/join", JoinController, :new
+    post "/join", JoinController, :create
+
+    live_session :joined, on_mount: [{DarkwoodWeb.SessionHook, :require_join}] do
+      live "/", IncidentIndexLive
+      live "/incidents/:id", IncidentShowLive
+    end
   end
 
   # Other scopes may use custom stacks.
