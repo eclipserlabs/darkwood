@@ -26,6 +26,12 @@ defmodule DarkwoodWeb.Router do
     end
   end
 
+  scope "/api/v1", DarkwoodWeb do
+    pipe_through :api
+
+    post "/incidents/:id/ingest", IngestController, :create
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", DarkwoodWeb do
   #   pipe_through :api

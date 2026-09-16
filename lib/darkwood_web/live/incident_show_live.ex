@@ -1,5 +1,6 @@
 defmodule DarkwoodWeb.IncidentShowLive do
   use DarkwoodWeb, :live_view
+  import DarkwoodWeb.IncidentComponents, only: [aggregation_badge: 1]
   alias Darkwood.Incidents
   alias DarkwoodWeb.Presence
 
@@ -59,6 +60,15 @@ defmodule DarkwoodWeb.IncidentShowLive do
   @impl true
   def handle_info({:annotation_created, _annotation}, socket),
     do: {:noreply, reload_annotations(socket)}
+
+  def handle_info({:event_created, event}, socket) do
+    socket =
+      socket
+      |> stream_insert(:events, event)
+      |> assign(:incident, Incidents.get_incident_with_events!(socket.assigns.incident.id))
+
+    {:noreply, socket}
+  end
 
   def handle_info({:incident_updated, _incident}, socket),
     do:
@@ -171,8 +181,8 @@ defmodule DarkwoodWeb.IncidentShowLive do
                 event.occurred_at,
                 "%H:%M:%S.%f"
               )}</time><div>
-                <div class="flex gap-2 text-xs uppercase tracking-wider">
-                  <span class="text-amber-400">{event.kind}</span><span class="text-slate-500">{event.level}</span>
+                <div class="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wider">
+                  <span class="text-amber-400">{event.kind}</span><span class="text-slate-500">{event.level}</span><.aggregation_badge event={event} />
                 </div><p class="mt-2 text-slate-100">{event.message}</p><pre class="mt-3 overflow-x-auto whitespace-pre-wrap text-xs text-slate-500">{Jason.encode!(event.metadata, pretty: true)}</pre>
               </div>
             </article>
