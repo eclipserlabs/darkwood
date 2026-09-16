@@ -67,6 +67,171 @@ defmodule Darkwood.Incidents do
     end
   end
 
+  @aggregation_window_seconds 5
+
+  def aggregation_window_seconds, do: @aggregation_window_seconds
+
+  def ingest_event(%Incident{id: id}, attrs), do: ingest_event(id, attrs)
+
+  def ingest_event(incident_id, attrs) when is_binary(incident_id) do
+    case Integer.parse(incident_id) do
+      {parsed, ""} -> ingest_event(parsed, attrs)
+      _ -> {:error, :not_found}
+    end
+  end
+
+  def ingest_event(incident_id, attrs) when is_integer(incident_id) do
+    case Repo.get(Incident, incident_id) do
+      nil -> {:error, :not_found}
+      %Incident{} -> do_ingest(incident_id, attrs)
+    end
+  end
+
+  defp do_ingest(incident_id, attrs) when is_map(attrs) do
+    kind = attrs["kind"] || attrs[:kind]
+    level = attrs["level"] || attrs[:level]
+    message = attrs["message"] || attrs[:message]
+    user_metadata = normalize_ingest_metadata(attrs)
+    fingerprint = normalize_fingerprint(attrs, kind, message)
+    occurred_at = normalize_occurred_at(attrs)
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    now_iso = DateTime.to_iso8601(now)
+    cutoff = DateTime.add(now, -@aggregation_window_seconds, :second)
+
+    with :ok <- validate_ingest_fields(kind, level, message, user_metadata) do
+      case recent_event(incident_id, fingerprint, cutoff) do
+        %IncidentEvent{} = existing -> aggregate_existing(existing, now_iso)
+        nil -> insert_ingested(incident_id, kind, level, message, fingerprint, occurred_at, user_metadata, now_iso)
+      end
+    end
+  end
+
+  defp validate_ingest_fields(kind, level, message, metadata) do
+    kinds = ~w(request query http log error)
+    levels = ~w(info warning error)
+
+    cond do
+      is_nil(message) or (is_binary(message) and String.trim(message) == "") ->
+        {:error, invalid_ingest_changeset(:message, "can't be blank")}
+
+      to_string(kind || "") not in kinds ->
+        {:error, invalid_ingest_changeset(:kind, "is invalid")}
+
+      to_string(level || "") not in levels ->
+        {:error, invalid_ingest_changeset(:level, "is invalid")}
+
+      not is_map(metadata) ->
+        {:error, invalid_ingest_changeset(:metadata, "is invalid")}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp invalid_ingest_changeset(field, message) do
+    %IncidentEvent{}
+    |> Ecto.Changeset.cast(%{}, [])
+    |> Ecto.Changeset.add_error(field, message)
+  end
+
+  defp recent_event(incident_id, fingerprint, cutoff) do
+    Repo.one(
+      from e in IncidentEvent,
+        where: e.incident_id == ^incident_id and e.fingerprint == ^fingerprint,
+        where: e.inserted_at >= ^cutoff,
+        order_by: [desc: e.inserted_at],
+        limit: 1
+    )
+  end
+
+  defp aggregate_existing(%IncidentEvent{} = existing, now_iso) do
+    meta = existing.metadata || %{}
+    current = meta["count"] || meta[:count] || 1
+
+    first_seen =
+      meta["first_seen"] || meta[:first_seen] ||
+        DateTime.to_iso8601(existing.inserted_at)
+
+    updated_metadata =
+      meta
+      |> Map.new(fn {k, v} -> {to_string(k), v} end)
+      |> Map.merge(%{
+        "count" => current + 1,
+        "first_seen" => first_seen,
+        "last_seen" => now_iso
+      })
+
+    case existing |> IncidentEvent.changeset(%{metadata: updated_metadata}) |> Repo.update() do
+      {:ok, updated} -> {:ok, updated}
+      error -> error
+    end
+  end
+
+  defp insert_ingested(incident_id, kind, level, message, fingerprint, occurred_at, user_metadata, now_iso) do
+    full_metadata =
+      user_metadata
+      |> Map.new(fn {k, v} -> {to_string(k), v} end)
+      |> Map.merge(%{
+        "count" => 1,
+        "first_seen" => now_iso,
+        "last_seen" => now_iso
+      })
+
+    attrs = %{
+      kind: kind,
+      level: level,
+      message: message,
+      fingerprint: fingerprint,
+      occurred_at: occurred_at,
+      metadata: full_metadata
+    }
+
+    case %IncidentEvent{incident_id: incident_id} |> IncidentEvent.changeset(attrs) |> Repo.insert() do
+      {:ok, event} ->
+        broadcast(incident_id, {:event_created, event})
+        {:ok, event}
+
+      error ->
+        error
+    end
+  end
+
+  defp normalize_ingest_metadata(attrs) do
+    case attrs["metadata"] || attrs[:metadata] do
+      nil -> %{}
+      %{} = meta -> meta
+      _ -> %{}
+    end
+  end
+
+  defp normalize_fingerprint(attrs, kind, message) do
+    case attrs["fingerprint"] || attrs[:fingerprint] do
+      nil -> compute_fingerprint(kind, message)
+      "" -> compute_fingerprint(kind, message)
+      fp -> to_string(fp)
+    end
+  end
+
+  def compute_fingerprint(kind, message) do
+    :crypto.hash(:sha256, "#{to_string(kind)}:#{to_string(message)}")
+    |> Base.encode16(case: :lower)
+  end
+
+  defp normalize_occurred_at(attrs) do
+    case attrs["occurred_at"] || attrs[:occurred_at] do
+      nil -> DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      %DateTime{} = dt -> DateTime.truncate(dt, :microsecond)
+      bin when is_binary(bin) ->
+        case DateTime.from_iso8601(bin) do
+          {:ok, dt, _} -> DateTime.truncate(dt, :microsecond)
+          _ -> DateTime.utc_now() |> DateTime.truncate(:microsecond)
+        end
+
+      _ -> DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    end
+  end
+
   def topic(id), do: "incident:#{id}"
   def subscribe(id), do: Phoenix.PubSub.subscribe(Darkwood.PubSub, topic(id))
 
