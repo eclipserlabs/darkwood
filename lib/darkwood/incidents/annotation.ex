@@ -14,8 +14,9 @@ defmodule Darkwood.Incidents.Annotation do
     annotation
     |> cast(attrs, [:body, :event_id])
     |> validate_required([:author_name, :body])
-    |> validate_length(:author_name, max: 80)
-    |> validate_length(:body, max: 2000)
+    |> validate_length(:author_name, min: 1, max: 80)
+    |> validate_length(:body, min: 1, max: 2000)
+    |> foreign_key_constraint(:incident_id)
     |> foreign_key_constraint(:event_id)
   end
 end
