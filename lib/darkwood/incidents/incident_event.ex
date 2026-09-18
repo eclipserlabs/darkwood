@@ -18,5 +18,8 @@ defmodule Darkwood.Incidents.IncidentEvent do
     event
     |> cast(attrs, [:occurred_at, :kind, :level, :message, :fingerprint, :metadata])
     |> validate_required([:occurred_at, :kind, :level, :message])
+    |> validate_length(:message, min: 1, max: 5000)
+    |> validate_length(:fingerprint, max: 128)
+    |> foreign_key_constraint(:incident_id)
   end
 end

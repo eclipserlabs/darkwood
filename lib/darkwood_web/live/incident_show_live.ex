@@ -8,33 +8,44 @@ defmodule DarkwoodWeb.IncidentShowLive do
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    incident = Incidents.get_incident_with_events!(id)
-    annotations = Incidents.list_annotations(incident)
+    case Incidents.get_incident_with_events(id) do
+      nil ->
+        {:ok, socket |> put_flash(:error, "Incident not found.") |> push_navigate(to: ~p"/")}
 
-    socket =
-      socket
-      |> assign(:page_title, incident.title)
-      |> assign(:incident, incident)
-      |> assign(:statuses, @statuses)
-      |> assign(:users, [])
-      |> assign(:annotation_form, annotation_form())
-      |> assign(:event_annotation_form, annotation_form())
-      |> stream(:events, incident.events)
-      |> stream(:annotations, annotations)
+      incident ->
+        annotations = Incidents.list_annotations(incident)
 
-    if connected?(socket) do
-      :ok = Incidents.subscribe(incident.id)
+        socket =
+          socket
+          |> assign(:page_title, incident.title)
+          |> assign(:incident, incident)
+          |> assign(:statuses, @statuses)
+          |> assign(:users, [])
+          |> assign(:last_annotate_at, nil)
+          |> assign(:annotation_form, annotation_form())
+          |> assign(:event_annotation_form, annotation_form())
+          |> stream(:events, incident.events)
+          |> stream(:annotations, annotations)
 
-      {:ok, _} =
-        Presence.track(self(), Incidents.topic(incident.id), socket.assigns.client_id, %{
-          display_name: socket.assigns.display_name,
-          joined_at: DateTime.utc_now()
-        })
+        if connected?(socket) do
+          :ok = Incidents.subscribe(incident.id)
 
-      {:ok, assign(socket, :users, present_users(incident.id))}
-    else
-      {:ok, socket}
+          presence_key = "#{socket.assigns.client_id}:#{socket.id || System.unique_integer([:positive])}"
+
+          {:ok, _} =
+            Presence.track(self(), Incidents.topic(incident.id), presence_key, %{
+              display_name: socket.assigns.display_name,
+              joined_at: DateTime.utc_now()
+            })
+
+          {:ok, assign(socket, :users, present_users(incident.id))}
+        else
+          {:ok, socket}
+        end
     end
+  rescue
+    Ecto.Query.CastError ->
+      {:ok, push_navigate(socket, to: ~p"/") |> put_flash(:error, "Incident not found.")}
   end
 
   @impl true
@@ -62,22 +73,26 @@ defmodule DarkwoodWeb.IncidentShowLive do
     do: {:noreply, reload_annotations(socket)}
 
   def handle_info({:event_created, event}, socket) do
+    # Incremental insert only — no full incident reload (DB meltdown path).
     socket =
       socket
-      |> stream_insert(:events, event)
-      |> assign(:incident, Incidents.get_incident_with_events!(socket.assigns.incident.id))
+      |> stream_insert(:events, event, at: -1)
+      |> append_event_option(event)
 
     {:noreply, socket}
   end
 
-  def handle_info({:incident_updated, _incident}, socket),
-    do:
-      {:noreply,
-       assign(
-         socket,
-         :incident,
-         Incidents.get_incident_with_events!(socket.assigns.incident.id)
-       )}
+  def handle_info({:event_updated, event}, socket) do
+    socket =
+      socket
+      |> stream_insert(:events, event)
+      |> append_event_option(event)
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:incident_updated, incident}, socket),
+    do: {:noreply, assign(socket, :incident, %{socket.assigns.incident | status: incident.status})}
 
   def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff"}, socket),
     do: {:noreply, assign(socket, :users, present_users(socket.assigns.incident.id))}
@@ -85,17 +100,28 @@ defmodule DarkwoodWeb.IncidentShowLive do
   def handle_info(_message, socket), do: {:noreply, socket}
 
   defp save_annotation(params, form_key, socket) do
-    attrs = Map.put(params, "author_name", socket.assigns.display_name)
+    now = System.monotonic_time(:millisecond)
+    last = socket.assigns[:last_annotate_at]
 
-    case Incidents.create_annotation(socket.assigns.incident, attrs) do
-      {:ok, _annotation} ->
-        {:noreply, socket |> assign(form_key, annotation_form()) |> reload_annotations()}
+    if last && now - last < 1_000 do
+      {:noreply, put_flash(socket, :error, "Slow down — please wait before annotating again.")}
+    else
+      attrs = Map.put(params, "author_name", socket.assigns.display_name)
 
-      {:error, %Ecto.Changeset{} = changeset} ->
-        {:noreply, assign(socket, form_key, to_form(Map.put(changeset, :action, :insert)))}
+      case Incidents.create_annotation(socket.assigns.incident, attrs) do
+        {:ok, _annotation} ->
+          {:noreply,
+           socket
+           |> assign(form_key, annotation_form())
+           |> assign(:last_annotate_at, now)
+           |> reload_annotations()}
 
-      {:error, :event_not_in_incident} ->
-        {:noreply, put_flash(socket, :error, "Selected event does not belong to this incident.")}
+        {:error, %Ecto.Changeset{} = changeset} ->
+          {:noreply, assign(socket, form_key, to_form(Map.put(changeset, :action, :insert)))}
+
+        {:error, :event_not_in_incident} ->
+          {:noreply, put_flash(socket, :error, "Selected event does not belong to this incident.")}
+      end
     end
   end
 
@@ -112,7 +138,19 @@ defmodule DarkwoodWeb.IncidentShowLive do
     |> Presence.list()
     |> Enum.map(fn {_key, %{metas: metas}} -> List.first(metas) end)
     |> Enum.reject(&is_nil/1)
+    |> Enum.uniq_by(& &1.display_name)
     |> Enum.sort_by(& &1.display_name)
+  end
+
+  defp append_event_option(socket, event) do
+    incident = socket.assigns.incident
+
+    if Enum.any?(incident.events, &(&1.id == event.id)) do
+      updated_events = Enum.map(incident.events, fn e -> if e.id == event.id, do: event, else: e end)
+      assign(socket, :incident, %{incident | events: updated_events})
+    else
+      assign(socket, :incident, %{incident | events: incident.events ++ [event]})
+    end
   end
 
   @impl true

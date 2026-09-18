@@ -35,7 +35,7 @@ defmodule Darkwood.Ingestion.Pipeline do
 
   `incident_id` is the integer DB id, `attrs` is a map with
   `kind`, `level`, `message`, `metadata`, optional `fingerprint`/`occurred_at`.
-  Returns `:ok` immediately (async, back-pressured).
+  Returns `:ok` immediately (async, back-pressured) or `{:error, :overloaded}`.
   """
   def push(incident_id, attrs) when is_map(attrs) do
     Darkwood.Ingestion.Producer.push(%{incident_id: incident_id, attrs: attrs})
@@ -43,10 +43,21 @@ defmodule Darkwood.Ingestion.Pipeline do
 
   @impl true
   def handle_message(_, %Message{data: %{incident_id: incident_id, attrs: attrs}} = message, _) do
-    case Darkwood.Incidents.ingest_event(incident_id, attrs) do
-      {:ok, _event} -> message
-      {:error, reason} -> Message.failed(message, reason)
-    end
+    start = System.monotonic_time()
+
+    result =
+      case Darkwood.Incidents.ingest_event(incident_id, attrs) do
+        {:ok, _event} -> message
+        {:error, reason} -> Message.failed(message, reason)
+      end
+
+    :telemetry.execute(
+      [:darkwood, :ingestion, :processed],
+      %{duration: System.monotonic_time() - start},
+      %{incident_id: incident_id}
+    )
+
+    result
   end
 
   def handle_message(_, %Message{} = message, _) do

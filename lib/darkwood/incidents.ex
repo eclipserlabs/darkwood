@@ -6,34 +6,78 @@ defmodule Darkwood.Incidents do
 
   @sample_title "Checkout API 500 spike"
 
-  def list_incidents, do: Repo.all(from i in Incident, order_by: [desc: i.inserted_at])
+  @max_incidents 100
+  @max_events 500
+  @max_annotations 500
+  @max_message_length 5000
+  @max_metadata_keys 50
+  @max_metadata_bytes 32_768
+  @max_fingerprint_length 128
+
+  def list_incidents(opts \\ []) do
+    limit = Keyword.get(opts, :limit, @max_incidents) |> clamp_limit(@max_incidents)
+    Repo.all(from i in Incident, order_by: [desc: i.inserted_at], limit: ^limit)
+  end
+
   def get_incident!(id), do: Repo.get!(Incident, id)
 
-  def get_incident_with_events!(id) do
-    Incident
-    |> Repo.get!(id)
-    |> Repo.preload(events: from(e in IncidentEvent, order_by: [asc: e.occurred_at]))
+  def get_incident_with_events(id) do
+    case Repo.get(Incident, id) do
+      nil -> nil
+      incident -> Repo.preload(incident, events: from(e in IncidentEvent, order_by: [asc: e.occurred_at], limit: @max_events))
+    end
   end
+
+  def get_incident_with_events!(id) do
+    case get_incident_with_events(id) do
+      nil -> raise Ecto.NoResultsError, queryable: Incident
+      incident -> incident
+    end
+  end
+
+  defp clamp_limit(n, max) when is_integer(n) and n > 0, do: min(n, max)
+  defp clamp_limit(_, max), do: max
 
   def change_incident(incident \\ %Incident{}, attrs \\ %{}) do
     Incident.changeset(incident, attrs)
   end
 
-  def create_incident(attrs), do: %Incident{} |> Incident.changeset(attrs) |> Repo.insert()
+  def create_incident(attrs) do
+    case %Incident{} |> Incident.changeset(attrs) |> Repo.insert() do
+      {:ok, incident} ->
+        Phoenix.PubSub.broadcast(Darkwood.PubSub, incidents_topic(), {:incident_created, incident})
+        {:ok, incident}
 
-  def list_events(%Incident{id: id}), do: list_events(id)
-
-  def list_events(id) do
-    Repo.all(from e in IncidentEvent, where: e.incident_id == ^id, order_by: [asc: e.occurred_at])
+      error ->
+        error
+    end
   end
 
-  def list_annotations(%Incident{id: id}), do: list_annotations(id)
+  def incidents_topic, do: "incidents"
+  def subscribe_incidents, do: Phoenix.PubSub.subscribe(Darkwood.PubSub, incidents_topic())
 
-  def list_annotations(id) do
+  def list_events(incident_or_id, opts \\ [])
+  def list_events(%Incident{id: id}, opts), do: list_events(id, opts)
+
+  def list_events(id, opts) when is_list(opts) do
+    limit = Keyword.get(opts, :limit, @max_events) |> clamp_limit(@max_events)
+
+    Repo.all(
+      from e in IncidentEvent, where: e.incident_id == ^id, order_by: [asc: e.occurred_at], limit: ^limit
+    )
+  end
+
+  def list_annotations(incident_or_id, opts \\ [])
+  def list_annotations(%Incident{id: id}, opts), do: list_annotations(id, opts)
+
+  def list_annotations(id, opts) when is_list(opts) do
+    limit = Keyword.get(opts, :limit, @max_annotations) |> clamp_limit(@max_annotations)
+
     Repo.all(
       from a in Annotation,
         where: a.incident_id == ^id,
         order_by: [asc: a.inserted_at],
+        limit: ^limit,
         preload: [:event]
     )
   end
@@ -99,21 +143,62 @@ defmodule Darkwood.Incidents do
     now_iso = DateTime.to_iso8601(now)
     cutoff = DateTime.add(now, -@aggregation_window_seconds, :second)
 
-    with :ok <- validate_ingest_fields(kind, level, message, user_metadata) do
-      case recent_event(incident_id, fingerprint, cutoff) do
-        %IncidentEvent{} = existing -> aggregate_existing(existing, now_iso)
-        nil -> insert_ingested(incident_id, kind, level, message, fingerprint, occurred_at, user_metadata, now_iso)
+    with :ok <- validate_ingest_fields(kind, level, message, user_metadata, fingerprint, occurred_at, now) do
+      # Serialize concurrent ingests for the same incident+fingerprint so the
+      # 5s dedup check + increment is atomic. Transaction-scoped advisory lock.
+      # Persist first, broadcast second (after commit).
+      lock_key = :erlang.phash2({incident_id, fingerprint})
+
+      transaction_result =
+        Repo.transaction(fn ->
+          Repo.query!("SELECT pg_advisory_xact_lock($1, $2)", [incident_id, lock_key])
+
+          case recent_event(incident_id, fingerprint, cutoff) do
+            %IncidentEvent{} = existing ->
+              case aggregate_existing(existing, now_iso) do
+                {:ok, updated} -> {:aggregated, updated}
+                {:error, _} = err -> Repo.rollback(err)
+              end
+
+            nil ->
+              case insert_ingested(incident_id, kind, level, message, fingerprint, occurred_at, user_metadata, now_iso) do
+                {:ok, event} -> {:inserted, event}
+                {:error, _} = err -> Repo.rollback(err)
+              end
+          end
+        end)
+
+      case transaction_result do
+        {:ok, {:aggregated, event}} ->
+          broadcast(incident_id, {:event_updated, event})
+          {:ok, event}
+
+        {:ok, {:inserted, event}} ->
+          broadcast(incident_id, {:event_created, event})
+          {:ok, event}
+
+        {:ok, {:error, _} = err} ->
+          err
+
+        {:error, {:error, _} = err} ->
+          err
+
+        {:error, _} = err ->
+          err
       end
     end
   end
 
-  defp validate_ingest_fields(kind, level, message, metadata) do
+  defp validate_ingest_fields(kind, level, message, metadata, fingerprint \\ nil, occurred_at \\ nil, now \\ nil) do
     kinds = ~w(request query http log error)
     levels = ~w(info warning error)
 
     cond do
       is_nil(message) or (is_binary(message) and String.trim(message) == "") ->
         {:error, invalid_ingest_changeset(:message, "can't be blank")}
+
+      is_binary(message) and String.length(message) > @max_message_length ->
+        {:error, invalid_ingest_changeset(:message, "is too long")}
 
       to_string(kind || "") not in kinds ->
         {:error, invalid_ingest_changeset(:kind, "is invalid")}
@@ -124,10 +209,41 @@ defmodule Darkwood.Incidents do
       not is_map(metadata) ->
         {:error, invalid_ingest_changeset(:metadata, "is invalid")}
 
+      map_size(metadata) > @max_metadata_keys ->
+        {:error, invalid_ingest_changeset(:metadata, "has too many keys")}
+
+      metadata_too_large?(metadata) ->
+        {:error, invalid_ingest_changeset(:metadata, "is too large")}
+
+      not is_nil(fingerprint) and String.length(to_string(fingerprint)) > @max_fingerprint_length ->
+        {:error, invalid_ingest_changeset(:fingerprint, "is too long")}
+
+      not valid_occurred_at?(occurred_at, now) ->
+        {:error, invalid_ingest_changeset(:occurred_at, "is invalid")}
+
       true ->
         :ok
     end
   end
+
+  defp metadata_too_large?(metadata) do
+    try do
+      :erlang.external_size(metadata) > @max_metadata_bytes
+    rescue
+      _ -> true
+    end
+  end
+
+  defp valid_occurred_at?(nil, _), do: true
+  defp valid_occurred_at?(_, nil), do: true
+
+  defp valid_occurred_at?(%DateTime{} = dt, %DateTime{} = now) do
+    # Allow 5min clock skew into the future, 30d retention into the past.
+    DateTime.compare(dt, DateTime.add(now, 300, :second)) != :gt and
+      DateTime.compare(dt, DateTime.add(now, -30 * 24 * 3600, :second)) != :lt
+  end
+
+  defp valid_occurred_at?(_, _), do: false
 
   defp invalid_ingest_changeset(field, message) do
     %IncidentEvent{}
@@ -141,7 +257,8 @@ defmodule Darkwood.Incidents do
         where: e.incident_id == ^incident_id and e.fingerprint == ^fingerprint,
         where: e.inserted_at >= ^cutoff,
         order_by: [desc: e.inserted_at],
-        limit: 1
+        limit: 1,
+        lock: "FOR UPDATE"
     )
   end
 
@@ -162,10 +279,7 @@ defmodule Darkwood.Incidents do
         "last_seen" => now_iso
       })
 
-    case existing |> IncidentEvent.changeset(%{metadata: updated_metadata}) |> Repo.update() do
-      {:ok, updated} -> {:ok, updated}
-      error -> error
-    end
+    existing |> IncidentEvent.changeset(%{metadata: updated_metadata}) |> Repo.update()
   end
 
   defp insert_ingested(incident_id, kind, level, message, fingerprint, occurred_at, user_metadata, now_iso) do
@@ -188,12 +302,8 @@ defmodule Darkwood.Incidents do
     }
 
     case %IncidentEvent{incident_id: incident_id} |> IncidentEvent.changeset(attrs) |> Repo.insert() do
-      {:ok, event} ->
-        broadcast(incident_id, {:event_created, event})
-        {:ok, event}
-
-      error ->
-        error
+      {:ok, event} -> {:ok, event}
+      error -> error
     end
   end
 
