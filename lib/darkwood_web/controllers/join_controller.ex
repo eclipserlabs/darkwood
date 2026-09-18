@@ -25,6 +25,12 @@ defmodule DarkwoodWeb.JoinController do
 
   def create(conn, params), do: create(conn, Map.put(params, "display_name", ""))
 
+  def delete(conn, _params) do
+    conn
+    |> clear_session()
+    |> redirect(to: ~p"/join")
+  end
+
   defp safe_return_to(nil), do: nil
 
   defp safe_return_to(path) when is_binary(path) do
