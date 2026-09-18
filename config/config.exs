@@ -11,6 +11,8 @@ config :darkwood,
   ecto_repos: [Darkwood.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+config :darkwood, :ingest_api_key, nil
+
 # Configure the endpoint
 config :darkwood, DarkwoodWeb.Endpoint,
   url: [host: "localhost"],
