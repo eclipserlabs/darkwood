@@ -30,4 +30,13 @@ defmodule DarkwoodWeb.JoinControllerTest do
       assert redirected_to(response) == ~p"/"
     end
   end
+
+  test "DELETE /logout clears the session", %{conn: conn} do
+    conn = post(conn, ~p"/join", %{display_name: "Alice"})
+    assert get_session(conn, :display_name) == "Alice"
+
+    conn = delete(recycle(conn), ~p"/logout")
+    assert redirected_to(conn) == ~p"/join"
+    refute get_session(conn, :display_name)
+  end
 end
