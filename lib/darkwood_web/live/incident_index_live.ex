@@ -6,12 +6,19 @@ defmodule DarkwoodWeb.IncidentIndexLive do
   def mount(_params, _session, socket) do
     incidents = Incidents.list_incidents()
 
+    if connected?(socket), do: :ok = Incidents.subscribe_incidents()
+
     {:ok,
      socket
      |> assign(:page_title, "Incidents")
      |> assign(:empty?, incidents == [])
      |> assign(:form, to_form(Incidents.change_incident()))
      |> stream(:incidents, incidents)}
+  end
+
+  @impl true
+  def handle_info({:incident_created, incident}, socket) do
+    {:noreply, socket |> stream_insert(:incidents, incident, at: 0) |> assign(:empty?, false)}
   end
 
   @impl true
