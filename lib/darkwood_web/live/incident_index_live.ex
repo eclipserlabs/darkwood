@@ -64,7 +64,15 @@ defmodule DarkwoodWeb.IncidentIndexLive do
               Signed in as {@display_name}
             </p>
           </div>
-          <span class="rounded-full border border-emerald-800 bg-emerald-950 px-3 py-1 text-xs font-medium text-emerald-300">Operational</span>
+          <div class="flex items-center gap-3">
+            <span class="rounded-full border border-emerald-800 bg-emerald-950 px-3 py-1 text-xs font-medium text-emerald-300">Operational</span>
+            <.link
+              id="logout"
+              href={~p"/logout"}
+              method="delete"
+              class="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 hover:text-white"
+            >Sign out</.link>
+          </div>
         </header>
 
         <section id="incident-list" phx-update="stream" class="grid gap-3">
