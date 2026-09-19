@@ -23,30 +23,59 @@ defmodule Darkwood.Ingestion.Producer do
   @doc """
   Enqueue an ingestion payload for async processing.
 
-  Returns `:ok` or `{:error, :overloaded}` when the buffer is full.
+  Routes to the Broadway producer stage (Broadway starts our callbacks
+  under its own process name, so `__MODULE__` is never registered).
+  Returns `:ok` or `{:error, :overloaded}` when the buffer is full or the
+  pipeline is unavailable.
   """
   def push(event) do
-    try do
-      GenStage.call(__MODULE__, {:push, event}, 5_000)
-    catch
-      :exit, {:timeout, _} ->
-        :telemetry.execute([:darkwood, :ingestion, :drop], %{count: 1}, %{reason: :timeout})
+    case producer_stage() do
+      nil ->
+        :telemetry.execute([:darkwood, :ingestion, :drop], %{count: 1}, %{reason: :no_pipeline})
         {:error, :overloaded}
+
+      stage ->
+        try do
+          GenStage.call(stage, {:push, event}, 5_000)
+        catch
+          :exit, _ ->
+            :telemetry.execute([:darkwood, :ingestion, :drop], %{count: 1}, %{reason: :timeout})
+            {:error, :overloaded}
+        end
     end
   end
 
   @doc "Current buffered + pending demand depth (best effort)."
   def depth do
-    try do
-      GenStage.call(__MODULE__, :depth, 2_000)
-    catch
-      _, _ -> :unknown
+    case producer_stage() do
+      nil ->
+        :unknown
+
+      stage ->
+        try do
+          GenStage.call(stage, :depth, 2_000)
+        catch
+          _, _ -> :unknown
+        end
     end
   end
 
+  defp producer_stage do
+    case Broadway.Topology.producer_names(Darkwood.Ingestion.Pipeline) do
+      [name | _] when is_atom(name) -> name
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
   @impl true
-  def init(max_buffer) do
-    {:producer, {:queue.new(), 0, 0, max_buffer}}
+  def init(_arg) do
+    # Broadway invokes `init/1` directly with its own args (`[broadway: ...]`);
+    # buffer bound always comes from application config.
+    {:producer, {:queue.new(), 0, 0, max_buffer()}}
   end
 
   @impl true
@@ -63,6 +92,7 @@ defmodule Darkwood.Ingestion.Producer do
     end
   end
 
+  @impl true
   def handle_call(:depth, _from, {queue, pending, buffered, _max} = state) do
     {:reply, %{buffered: buffered, pending: pending, queue_len: :queue.len(queue)}, [], state}
   rescue
