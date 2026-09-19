@@ -63,7 +63,7 @@ defmodule Darkwood.Ingestion.Producer do
     end
   end
 
-  def handle_call(:depth, _from, {queue, pending, buffered, max} = state) do
+  def handle_call(:depth, _from, {queue, pending, buffered, _max} = state) do
     {:reply, %{buffered: buffered, pending: pending, queue_len: :queue.len(queue)}, [], state}
   rescue
     _ -> {:reply, :unknown, [], state}
