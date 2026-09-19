@@ -14,8 +14,7 @@ ENV MIX_ENV=prod
 
 COPY mix.exs mix.lock ./
 RUN mix deps.get --only prod
-RUN mkdir config
-COPY config/config.exs config/prod.exs config/
+COPY config config/
 RUN mix deps.compile
 
 COPY priv priv
@@ -28,7 +27,7 @@ RUN mix release
 
 FROM debian:${DEBIAN_VERSION} AS app
 
-RUN apt-get update -y && apt-get install -y libstdc++6 openssl libncurses6 locales ca-certificates \
+RUN apt-get update -y && apt-get install -y libstdc++6 openssl libncurses6 locales ca-certificates wget \
   && apt-get clean && rm -f /var/lib/apt/lists/*_*
 
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
