@@ -14,7 +14,6 @@ defmodule Darkwood.Application do
       {Phoenix.PubSub, name: Darkwood.PubSub},
       DarkwoodWeb.Presence,
       Darkwood.Ingestion.RateLimiter,
-      Darkwood.Ingestion.Pipeline,
       # Start to serve requests, typically the last entry
       DarkwoodWeb.Endpoint
     ]

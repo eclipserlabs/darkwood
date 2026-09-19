@@ -1,15 +1,17 @@
 defmodule DarkwoodWeb.IngestController do
   @moduledoc """
-  Async ingestion API for external log/error payloads.
+  Synchronous ingestion API for external log/error payloads.
 
   POST /api/v1/incidents/:id/ingest
   Accepts JSON: %{kind, level, message, metadata?, fingerprint?, occurred_at?}
-  Pushes into the Broadway pipeline and returns 202 immediately.
+  Persists (or atomically aggregates) the event in PostgreSQL before
+  responding. `202` means the evidence is durable and accepted for
+  downstream processing — never merely queued.
   """
   use DarkwoodWeb, :controller
 
+  alias Darkwood.Incidents
   alias Darkwood.Incidents.Incident
-  alias Darkwood.Ingestion.Pipeline
   alias Darkwood.Repo
 
   @kinds ~w(request query http log error)
@@ -36,17 +38,24 @@ defmodule DarkwoodWeb.IngestController do
 
           case validate(attrs) do
             :ok ->
-              case Pipeline.push(incident_id, attrs) do
-                :ok ->
+              # Durable boundary: success is returned only after the event
+              # (or its aggregation) commits. Any error tuple or raised
+              # transaction failure must never produce a success response.
+              case Incidents.ingest_event(incident_id, attrs) do
+                {:ok, _event} ->
                   conn
                   |> put_status(:accepted)
                   |> json(%{status: "accepted", incident_id: incident_id})
 
-                {:error, :overloaded} ->
+                {:error, :not_found} ->
                   conn
-                  |> put_resp_header("retry-after", "1")
-                  |> put_status(:too_many_requests)
-                  |> json(%{errors: %{detail: "Ingestion overloaded, retry shortly"}})
+                  |> put_status(:not_found)
+                  |> json(%{errors: %{detail: "Incident not found"}})
+
+                {:error, %Ecto.Changeset{} = changeset} ->
+                  conn
+                  |> put_status(:unprocessable_entity)
+                  |> json(%{errors: %{detail: changeset_detail(changeset)}})
               end
 
             {:error, detail} ->
@@ -101,6 +110,12 @@ defmodule DarkwoodWeb.IngestController do
     Repo.get(Incident, id)
   rescue
     Ecto.Query.CastError -> nil
+  end
+
+  defp changeset_detail(changeset) do
+    changeset
+    |> Ecto.Changeset.traverse_errors(fn {msg, _opts} -> msg end)
+    |> Enum.find_value("is invalid", fn {_field, messages} -> List.first(messages) end)
   end
 
   defp validate(%{"kind" => kind, "level" => level, "message" => message, "metadata" => metadata} = attrs) do

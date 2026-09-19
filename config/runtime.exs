@@ -60,9 +60,6 @@ if config_env() == :prod do
 
   config :darkwood, :ingest_api_key, System.get_env("INGEST_API_KEY")
 
-  config :darkwood, Darkwood.Ingestion.Producer,
-    max_buffer: String.to_integer(System.get_env("INGEST_MAX_BUFFER") || "5000")
-
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
   # want to use a different value for prod and you most likely don't want
