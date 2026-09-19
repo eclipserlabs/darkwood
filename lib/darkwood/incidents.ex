@@ -189,7 +189,7 @@ defmodule Darkwood.Incidents do
     end
   end
 
-  defp validate_ingest_fields(kind, level, message, metadata, fingerprint \\ nil, occurred_at \\ nil, now \\ nil) do
+  defp validate_ingest_fields(kind, level, message, metadata, fingerprint, occurred_at, now) do
     kinds = ~w(request query http log error)
     levels = ~w(info warning error)
 
