@@ -137,13 +137,13 @@ defmodule Darkwood.Incidents do
     message = attrs["message"] || attrs[:message]
     user_metadata = normalize_ingest_metadata(attrs)
     fingerprint = normalize_fingerprint(attrs, kind, message)
-    occurred_at = normalize_occurred_at(attrs)
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     now_iso = DateTime.to_iso8601(now)
     cutoff = DateTime.add(now, -@aggregation_window_seconds, :second)
 
-    with :ok <- validate_ingest_fields(kind, level, message, user_metadata, fingerprint, occurred_at, now) do
+    with :ok <- validate_ingest_fields(kind, level, message, user_metadata, fingerprint),
+         {:ok, occurred_at} <- parse_occurred_at(attrs, now) do
       # Serialize concurrent ingests for the same incident+fingerprint so the
       # 5s dedup check + increment is atomic. Transaction-scoped advisory lock.
       # Persist first, broadcast second (after commit).
@@ -189,7 +189,7 @@ defmodule Darkwood.Incidents do
     end
   end
 
-  defp validate_ingest_fields(kind, level, message, metadata, fingerprint, occurred_at, now) do
+  defp validate_ingest_fields(kind, level, message, metadata, fingerprint) do
     kinds = ~w(request query http log error)
     levels = ~w(info warning error)
 
@@ -218,12 +218,46 @@ defmodule Darkwood.Incidents do
       not is_nil(fingerprint) and String.length(to_string(fingerprint)) > @max_fingerprint_length ->
         {:error, invalid_ingest_changeset(:fingerprint, "is too long")}
 
-      not valid_occurred_at?(occurred_at, now) ->
-        {:error, invalid_ingest_changeset(:occurred_at, "is invalid")}
-
       true ->
         :ok
     end
+  end
+
+  # Fail closed: a supplied timestamp must parse and fall within the
+  # acceptance window (5min future skew, 30d retention). Anything else is
+  # a validation error — never silently replaced with `now`.
+  defp parse_occurred_at(attrs, now) do
+    case attrs["occurred_at"] || attrs[:occurred_at] do
+      nil ->
+        {:ok, DateTime.truncate(now, :microsecond)}
+
+      %DateTime{} = dt ->
+        check_occurred_at_bounds(DateTime.truncate(dt, :microsecond), now)
+
+      bin when is_binary(bin) ->
+        case DateTime.from_iso8601(bin) do
+          {:ok, dt, _} -> check_occurred_at_bounds(DateTime.truncate(dt, :microsecond), now)
+          _ -> {:error, invalid_ingest_changeset(:occurred_at, "is invalid")}
+        end
+
+      _ ->
+        {:error, invalid_ingest_changeset(:occurred_at, "is invalid")}
+    end
+  end
+
+  defp check_occurred_at_bounds(dt, now) do
+    if DateTime.compare(dt, DateTime.add(now, 300, :second)) != :gt and
+         DateTime.compare(dt, DateTime.add(now, -30 * 24 * 3600, :second)) != :lt do
+      {:ok, dt}
+    else
+      {:error, invalid_ingest_changeset(:occurred_at, "is out of range")}
+    end
+  end
+
+  defp invalid_ingest_changeset(field, message) do
+    %IncidentEvent{}
+    |> Ecto.Changeset.cast(%{}, [])
+    |> Ecto.Changeset.add_error(field, message)
   end
 
   defp metadata_too_large?(metadata) do
@@ -232,23 +266,6 @@ defmodule Darkwood.Incidents do
     rescue
       _ -> true
     end
-  end
-
-  defp valid_occurred_at?(nil, _), do: true
-  defp valid_occurred_at?(_, nil), do: true
-
-  defp valid_occurred_at?(%DateTime{} = dt, %DateTime{} = now) do
-    # Allow 5min clock skew into the future, 30d retention into the past.
-    DateTime.compare(dt, DateTime.add(now, 300, :second)) != :gt and
-      DateTime.compare(dt, DateTime.add(now, -30 * 24 * 3600, :second)) != :lt
-  end
-
-  defp valid_occurred_at?(_, _), do: false
-
-  defp invalid_ingest_changeset(field, message) do
-    %IncidentEvent{}
-    |> Ecto.Changeset.cast(%{}, [])
-    |> Ecto.Changeset.add_error(field, message)
   end
 
   defp recent_event(incident_id, fingerprint, cutoff) do
@@ -326,20 +343,6 @@ defmodule Darkwood.Incidents do
   def compute_fingerprint(kind, message) do
     :crypto.hash(:sha256, "#{to_string(kind)}:#{to_string(message)}")
     |> Base.encode16(case: :lower)
-  end
-
-  defp normalize_occurred_at(attrs) do
-    case attrs["occurred_at"] || attrs[:occurred_at] do
-      nil -> DateTime.utc_now() |> DateTime.truncate(:microsecond)
-      %DateTime{} = dt -> DateTime.truncate(dt, :microsecond)
-      bin when is_binary(bin) ->
-        case DateTime.from_iso8601(bin) do
-          {:ok, dt, _} -> DateTime.truncate(dt, :microsecond)
-          _ -> DateTime.utc_now() |> DateTime.truncate(:microsecond)
-        end
-
-      _ -> DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    end
   end
 
   def topic(id), do: "incident:#{id}"
