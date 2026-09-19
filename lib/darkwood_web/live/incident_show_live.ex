@@ -45,7 +45,7 @@ defmodule DarkwoodWeb.IncidentShowLive do
     end
   rescue
     Ecto.Query.CastError ->
-      {:ok, push_navigate(socket, to: ~p"/") |> put_flash(:error, "Incident not found.")}
+      {:ok, socket |> put_flash(:error, "Incident not found.") |> push_navigate(to: ~p"/")}
   end
 
   @impl true
@@ -58,7 +58,7 @@ defmodule DarkwoodWeb.IncidentShowLive do
   def handle_event("status", %{"status" => status}, socket) when status in @statuses do
     case Incidents.update_incident_status(socket.assigns.incident, status) do
       {:ok, incident} ->
-        {:noreply, assign(socket, :incident, incident)}
+        {:noreply, assign(socket, :incident, %{socket.assigns.incident | status: incident.status})}
 
       {:error, _changeset} ->
         {:noreply, put_flash(socket, :error, "Status could not be updated.")}
