@@ -79,18 +79,15 @@ defmodule DarkwoodWeb.Telemetry do
       summary("vm.memory.total", unit: {:byte, :kilobyte}),
       summary("vm.total_run_queue_lengths.total"),
       summary("vm.total_run_queue_lengths.cpu"),
-      summary("vm.total_run_queue_lengths.io"),
-
-      # Ingestion pipeline
-      sum("darkwood.ingestion.push.count"),
-      sum("darkwood.ingestion.drop.count"),
-      summary("darkwood.ingestion.processed.duration", unit: {:native, :millisecond})
+      summary("vm.total_run_queue_lengths.io")
     ]
   end
 
   defp periodic_measurements do
     [
-      {Darkwood.Ingestion.TelemetryPoller, :dispatch, []}
+      # A module, function and arguments to be invoked periodically.
+      # This function must call :telemetry.execute/3 and a metric must be added above.
+      # {DarkwoodWeb, :count_users, []}
     ]
   end
 end
