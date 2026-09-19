@@ -18,7 +18,7 @@ defmodule DarkwoodWeb.IngestController do
   def create(conn, %{"id" => id} = params) do
     with :ok <- check_auth(conn),
          :ok <- check_rate_limit(conn) do
-      case Repo.get(Incident, id) do
+      case safe_get(id) do
         nil ->
           conn
           |> put_status(:not_found)
@@ -95,6 +95,12 @@ defmodule DarkwoodWeb.IngestController do
     Darkwood.Ingestion.RateLimiter.check(ip)
   rescue
     _ -> :ok
+  end
+
+  defp safe_get(id) do
+    Repo.get(Incident, id)
+  rescue
+    Ecto.Query.CastError -> nil
   end
 
   defp validate(%{"kind" => kind, "level" => level, "message" => message, "metadata" => metadata} = attrs) do

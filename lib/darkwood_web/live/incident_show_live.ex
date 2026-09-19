@@ -21,7 +21,6 @@ defmodule DarkwoodWeb.IncidentShowLive do
           |> assign(:incident, incident)
           |> assign(:statuses, @statuses)
           |> assign(:users, [])
-          |> assign(:last_annotate_at, nil)
           |> assign(:annotation_form, annotation_form())
           |> assign(:event_annotation_form, annotation_form())
           |> stream(:events, incident.events)
@@ -45,7 +44,7 @@ defmodule DarkwoodWeb.IncidentShowLive do
     end
   rescue
     Ecto.Query.CastError ->
-      {:ok, push_navigate(socket, to: ~p"/") |> put_flash(:error, "Incident not found.")}
+      {:ok, socket |> put_flash(:error, "Incident not found.") |> push_navigate(to: ~p"/")}
   end
 
   @impl true
@@ -58,7 +57,7 @@ defmodule DarkwoodWeb.IncidentShowLive do
   def handle_event("status", %{"status" => status}, socket) when status in @statuses do
     case Incidents.update_incident_status(socket.assigns.incident, status) do
       {:ok, incident} ->
-        {:noreply, assign(socket, :incident, incident)}
+        {:noreply, assign(socket, :incident, %{socket.assigns.incident | status: incident.status})}
 
       {:error, _changeset} ->
         {:noreply, put_flash(socket, :error, "Status could not be updated.")}
@@ -100,28 +99,17 @@ defmodule DarkwoodWeb.IncidentShowLive do
   def handle_info(_message, socket), do: {:noreply, socket}
 
   defp save_annotation(params, form_key, socket) do
-    now = System.monotonic_time(:millisecond)
-    last = socket.assigns[:last_annotate_at]
+    attrs = Map.put(params, "author_name", socket.assigns.display_name)
 
-    if last && now - last < 1_000 do
-      {:noreply, put_flash(socket, :error, "Slow down — please wait before annotating again.")}
-    else
-      attrs = Map.put(params, "author_name", socket.assigns.display_name)
+    case Incidents.create_annotation(socket.assigns.incident, attrs) do
+      {:ok, _annotation} ->
+        {:noreply, socket |> assign(form_key, annotation_form()) |> reload_annotations()}
 
-      case Incidents.create_annotation(socket.assigns.incident, attrs) do
-        {:ok, _annotation} ->
-          {:noreply,
-           socket
-           |> assign(form_key, annotation_form())
-           |> assign(:last_annotate_at, now)
-           |> reload_annotations()}
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:noreply, assign(socket, form_key, to_form(Map.put(changeset, :action, :insert)))}
 
-        {:error, %Ecto.Changeset{} = changeset} ->
-          {:noreply, assign(socket, form_key, to_form(Map.put(changeset, :action, :insert)))}
-
-        {:error, :event_not_in_incident} ->
-          {:noreply, put_flash(socket, :error, "Selected event does not belong to this incident.")}
-      end
+      {:error, :event_not_in_incident} ->
+        {:noreply, put_flash(socket, :error, "Selected event does not belong to this incident.")}
     end
   end
 

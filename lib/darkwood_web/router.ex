@@ -19,6 +19,8 @@ defmodule DarkwoodWeb.Router do
 
     get "/join", JoinController, :new
     post "/join", JoinController, :create
+    delete "/logout", JoinController, :delete
+    get "/logout", JoinController, :delete
 
     live_session :joined, on_mount: [{DarkwoodWeb.SessionHook, :require_join}] do
       live "/", IncidentIndexLive

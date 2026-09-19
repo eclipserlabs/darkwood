@@ -19,6 +19,7 @@ defmodule Darkwood.Ingestion.Pipeline do
       name: __MODULE__,
       producer: [
         module: {Darkwood.Ingestion.Producer, []},
+        transformer: {__MODULE__, :transform, []},
         concurrency: 1
       ],
       processors: [
@@ -39,6 +40,14 @@ defmodule Darkwood.Ingestion.Pipeline do
   """
   def push(incident_id, attrs) when is_map(attrs) do
     Darkwood.Ingestion.Producer.push(%{incident_id: incident_id, attrs: attrs})
+  end
+
+  @doc false
+  def transform(event, _opts) do
+    %Message{
+      data: event,
+      acknowledger: {Broadway.NoopAcknowledger, nil, nil}
+    }
   end
 
   @impl true
